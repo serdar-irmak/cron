@@ -54,6 +54,7 @@ type Schedule interface {
 
 	// Prev returns the previous activation time, earlier than the given time.
 	Prev(time.Time) time.Time
+	IsOnce() bool
 }
 
 // EntryID identifies an entry within a Cron instance
@@ -319,16 +320,26 @@ func (c *Cron) run() {
 				now = now.In(c.location)
 				c.logger.Info("wake", "now", now)
 
+				del := 0
+
 				// Run every entry whose next time was less than now
-				for _, e := range c.entries {
+				for k, e := range c.entries {
 					if e.Next.After(now) || e.Next.IsZero() {
 						break
 					}
+
 					c.startJob(e.WrappedJob)
 					e.Prev = e.Next
 					e.Next = e.Schedule.Next(now)
 					c.logger.Info("run", "now", now, "entry", e.ID, "next", e.Next)
+					// only run once
+					if e.Schedule.IsOnce() {
+						c.entries[k] = c.entries[del]
+						del++
+					}
+
 				}
+				c.entries = c.entries[del:]
 
 			case newEntry := <-c.add:
 				timer.Stop()
