@@ -25,9 +25,22 @@ type Cron struct {
 	runningMu      sync.Mutex
 	location       *time.Location
 	parser         ScheduleParser
-	nextID         EntryID
 	jobWaiter      sync.WaitGroup
 	context        context.Context
+	idGenerator    IDGenerator
+}
+
+type IDGenerator interface {
+	Generator() EntryID
+}
+
+type IntIdGenerator struct {
+	nextID int
+}
+
+func (r *IntIdGenerator) Generator() EntryID {
+	r.nextID++
+	return r.nextID
 }
 
 // scheduleUpdateInfo encapsulates the information required to update the
@@ -73,7 +86,7 @@ type Schedule interface {
 }
 
 // EntryID identifies an entry within a Cron instance
-type EntryID int
+type EntryID interface{}
 
 // Entry consists of a schedule and the func to execute on that schedule.
 type Entry struct {
@@ -179,6 +192,7 @@ func New(opts ...Option) *Cron {
 		location:       time.Local,
 		parser:         standardParser,
 		context:        context.Background(),
+		idGenerator:    &IntIdGenerator{},
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -236,9 +250,7 @@ func (c *Cron) ScheduleOptionJob(schedule Schedule, cmd OptionJob, entryOpts ...
 func (c *Cron) Schedule(schedule Schedule, cmd Job, entryOpts ...EntryOption) EntryID {
 	c.runningMu.Lock()
 	defer c.runningMu.Unlock()
-	c.nextID++
 	entry := &Entry{
-		ID:         c.nextID,
 		Schedule:   schedule,
 		WrappedJob: c.chain.Then(cmd),
 		Job:        cmd,
@@ -246,6 +258,9 @@ func (c *Cron) Schedule(schedule Schedule, cmd Job, entryOpts ...EntryOption) En
 	}
 	for _, fn := range entryOpts {
 		fn(entry)
+	}
+	if entry.ID == nil {
+		entry.ID = c.idGenerator.Generator()
 	}
 	if !c.running {
 		heap.Push(&c.entries, entry)

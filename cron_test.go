@@ -17,6 +17,14 @@ import (
 // compensate for a few milliseconds of runtime.
 const OneSecond = 1*time.Second + 50*time.Millisecond
 
+type testIdGenerator struct {
+	test string
+}
+
+func (t *testIdGenerator) Generator() EntryID {
+	return t.test
+}
+
 type syncWriter struct {
 	wr bytes.Buffer
 	m  sync.Mutex
@@ -289,6 +297,54 @@ func TestTimeoutOptionJob(t *testing.T) {
 
 	})
 
+}
+
+func TestDisabledIdGenerator(t *testing.T) {
+	cron := New(WithParser(secondParser), DisabledIdGenerator(), WithChain())
+	cron.Start()
+	defer cron.Stop()
+	var calls int64
+
+	id, err := cron.AddOptionFunc("* * * * * ?", func(o *JobOption) {
+		atomic.AddInt64(&calls, 1)
+	}, func(entry *Entry) {
+		entry.ID = "123"
+	})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-time.After(OneSecond)
+	if id != "123" {
+		t.Errorf("id is %s, expected \"123\"\n", id)
+	}
+	if atomic.LoadInt64(&calls) != 1 {
+		t.Errorf("called %d times, expected 1\n", calls)
+	}
+}
+
+func TestForIdGenerator(t *testing.T) {
+	cron := New(WithParser(secondParser), WithIdGenerator(&testIdGenerator{
+		test: "321",
+	}), WithChain())
+	cron.Start()
+	defer cron.Stop()
+	var calls int64
+
+	id, err := cron.AddOptionFunc("* * * * * ?", func(o *JobOption) {
+		atomic.AddInt64(&calls, 1)
+	})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-time.After(OneSecond)
+	if id != "321" {
+		t.Errorf("id is %s, expected \"321\"\n", id)
+	}
+	if atomic.LoadInt64(&calls) != 1 {
+		t.Errorf("called %d times, expected 1\n", calls)
+	}
 }
 
 func TestRemoveOptionJob(t *testing.T) {
@@ -983,7 +1039,7 @@ func TestCron_PauseAndContinue(t *testing.T) {
 		ticks := 0
 		id, err := cron.AddFunc(spec, func() { ticks++ })
 		checkNoError(err)
-		if err := cron.Pause(id + 1); err == nil {
+		if err := cron.Pause(id.(int) + 1); err == nil {
 			t.Error("was able to pause invalid entry")
 		}
 	})

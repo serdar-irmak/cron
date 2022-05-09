@@ -61,15 +61,29 @@ func Recover(logger Logger) JobWrapper {
 func DelayIfStillRunning(logger Logger) JobWrapper {
 	return func(j Job) Job {
 		var mu sync.Mutex
-		return FuncJob(func() {
-			start := time.Now()
-			mu.Lock()
-			defer mu.Unlock()
-			if dur := time.Since(start); dur > time.Minute {
-				logger.Info("delay", "duration", dur)
-			}
-			j.Run()
-		})
+		switch j := j.(type) {
+		case OptionJob:
+			return FuncOptionJob(func(o *JobOption) {
+				start := time.Now()
+				mu.Lock()
+				defer mu.Unlock()
+				if dur := time.Since(start); dur > time.Minute {
+					logger.Info("delay", "duration", dur)
+				}
+				j.RunWithOption(o)
+			})
+		default: //and contains Job type
+			return FuncJob(func() {
+				start := time.Now()
+				mu.Lock()
+				defer mu.Unlock()
+				if dur := time.Since(start); dur > time.Minute {
+					logger.Info("delay", "duration", dur)
+				}
+				j.Run()
+			})
+		}
+
 	}
 }
 
@@ -79,6 +93,29 @@ func SkipIfStillRunning(logger Logger) JobWrapper {
 	return func(j Job) Job {
 		var ch = make(chan struct{}, 1)
 		ch <- struct{}{}
+		switch j := j.(type) {
+		case OptionJob:
+			return FuncOptionJob(func(o *JobOption) {
+				select {
+				case v := <-ch:
+					defer func() { ch <- v }()
+					j.RunWithOption(o)
+				default:
+					logger.Info("skip")
+				}
+			})
+		default:
+			return FuncJob(func() {
+				select {
+				case v := <-ch:
+					defer func() { ch <- v }()
+					j.Run()
+				default:
+					logger.Info("skip")
+				}
+			})
+
+		}
 		return FuncJob(func() {
 			select {
 			case v := <-ch:

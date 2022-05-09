@@ -43,3 +43,17 @@ func WithLogger(logger Logger) Option {
 		c.logger = logger
 	}
 }
+
+// WithIdGenerator use the provided id generator
+func WithIdGenerator(generator IDGenerator) Option {
+	return func(c *Cron) {
+		c.idGenerator = generator
+	}
+}
+
+// DisabledIdGenerator use the provided id generator
+func DisabledIdGenerator() Option {
+	return func(c *Cron) {
+		c.idGenerator = nil
+	}
+}
