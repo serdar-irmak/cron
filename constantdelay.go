@@ -19,7 +19,7 @@ func Every(duration time.Duration) ConstantDelaySchedule {
 		duration = time.Second
 	}
 	return ConstantDelaySchedule{
-		Delay: duration - time.Duration(duration.Nanoseconds())%time.Second,
+		Delay: duration.Truncate(time.Second),
 	}
 }
 
@@ -42,7 +42,7 @@ func (schedule ConstantDelaySchedule) Next(t time.Time) time.Time {
 		t = schedule.startAt.Add((t.Sub(schedule.startAt) / schedule.Delay) * (schedule.Delay))
 	}
 
-	return t.Add(schedule.Delay - time.Duration(t.Nanosecond())*time.Nanosecond)
+	return t.Add(schedule.Delay).Truncate(time.Second)
 }
 
 func (schedule ConstantDelaySchedule) IsOnce() bool {
