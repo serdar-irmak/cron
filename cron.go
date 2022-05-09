@@ -27,6 +27,7 @@ type Cron struct {
 	parser         ScheduleParser
 	nextID         EntryID
 	jobWaiter      sync.WaitGroup
+	context        context.Context
 }
 
 // scheduleUpdateInfo encapsulates the information required to update the
@@ -47,7 +48,8 @@ type Job interface {
 }
 
 type JobOption struct {
-	id EntryID
+	id      EntryID
+	Context context.Context
 }
 
 func (jo JobOption) GetID() EntryID {
@@ -100,6 +102,10 @@ type Entry struct {
 	// Paused is a flag to indicate that whether the job is currently paused.
 	Paused   bool
 	PausedMu sync.Mutex
+
+	// cancelContext is used cancel for current job work
+	Timeout    time.Duration
+	cancelFunc context.CancelFunc
 }
 
 // Valid returns true if this is not the zero entry.
@@ -172,6 +178,7 @@ func New(opts ...Option) *Cron {
 		logger:         DefaultLogger,
 		location:       time.Local,
 		parser:         standardParser,
+		context:        context.Background(),
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -196,8 +203,8 @@ func (c *Cron) AddFunc(spec string, cmd func(), entryOpts ...EntryOption) (Entry
 	return c.AddJob(spec, FuncJob(cmd), entryOpts...)
 }
 
-func (c *Cron) AddOptionFunc(spec string, cmd func(*JobOption)) (EntryID, error) {
-	return c.AddOptionJob(spec, FuncOptionJob(cmd))
+func (c *Cron) AddOptionFunc(spec string, cmd func(*JobOption), entryOpts ...EntryOption) (EntryID, error) {
+	return c.AddOptionJob(spec, FuncOptionJob(cmd), entryOpts...)
 }
 
 // AddJob adds a Job to the Cron to be run on the given schedule.
@@ -212,17 +219,16 @@ func (c *Cron) AddJob(spec string, cmd Job, entryOpts ...EntryOption) (EntryID, 
 	return c.Schedule(schedule, cmd, entryOpts...), nil
 }
 
-func (c *Cron) AddOptionJob(spec string, cmd OptionJob) (EntryID, error) {
-
+func (c *Cron) AddOptionJob(spec string, cmd OptionJob, entryOpts ...EntryOption) (EntryID, error) {
 	schedule, err := c.parser.Parse(spec)
 	if err != nil {
 		return 0, err
 	}
-	return c.ScheduleOptionJob(schedule, cmd), nil
+	return c.ScheduleOptionJob(schedule, cmd, entryOpts...), nil
 }
 
-func (c *Cron) ScheduleOptionJob(schedule Schedule, cmd OptionJob) EntryID {
-	return c.Schedule(schedule, cmd)
+func (c *Cron) ScheduleOptionJob(schedule Schedule, cmd OptionJob, entryOpts ...EntryOption) EntryID {
+	return c.Schedule(schedule, cmd, entryOpts...)
 }
 
 // Schedule adds a Job to the Cron to be run on the given schedule.
@@ -413,7 +419,7 @@ func (c *Cron) run() {
 
 					e = heap.Pop(&c.entries).(*Entry)
 
-					c.startJob(e.WrappedJob)
+					c.startJob(e.WrappedJob, e)
 					e.Prev = e.Next
 					e.Next = e.Schedule.Next(now)
 					c.logger.Info("run", "now", now, "entry", e.ID, "next", e.Next)
@@ -428,7 +434,7 @@ func (c *Cron) run() {
 				timer.Stop()
 				now = c.now()
 				newEntry.Next = newEntry.ScheduleFirst(now)
-				c.entries = append(c.entries, newEntry)
+				heap.Push(&c.entries, newEntry)
 				c.logger.Info("added", "now", now, "entry", newEntry.ID, "next", newEntry.Next)
 
 			case replyChan := <-c.snapshot:
@@ -472,19 +478,45 @@ func (c *Cron) run() {
 }
 
 // startJob runs the given job in a new goroutine.
-func (c *Cron) startJob(j Job) {
+func (c *Cron) startJob(j Job, entry *Entry) {
 	c.jobWaiter.Add(1)
+	ctx := c.generateCancelSignalContext(entry)
 	go func() {
 		defer c.jobWaiter.Done()
+
 		switch j := j.(type) {
 		case OptionJob:
 			j.RunWithOption(&JobOption{
-				c.nextID,
+				entry.ID,
+				ctx,
 			})
+			entry.cancelFunc = nil
 		case Job:
 			j.Run()
 		}
 	}()
+}
+
+func (c *Cron) CancelEntry(id EntryID) {
+	entry := c.Entry(id)
+	c.logger.Info("cancel", "id", id)
+
+	if entry.cancelFunc != nil {
+		entry.cancelFunc()
+	}
+}
+
+func (c *Cron) generateCancelSignalContext(e *Entry) context.Context {
+	var ctx context.Context
+	var cancelFunc context.CancelFunc
+	if e.Timeout == 0 {
+		ctx, cancelFunc = context.WithCancel(c.context)
+	} else {
+		ctx, cancelFunc = context.WithTimeout(c.context, e.Timeout)
+	}
+	e.cancelFunc = cancelFunc
+	return ctx
+
 }
 
 // now returns current time in c location
@@ -501,7 +533,7 @@ func (c *Cron) Stop() context.Context {
 		c.stop <- struct{}{}
 		c.running = false
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(c.context)
 	go func() {
 		c.jobWaiter.Wait()
 		cancel()

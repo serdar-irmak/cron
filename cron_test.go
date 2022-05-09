@@ -163,6 +163,134 @@ func TestAddWhileRunningWithDelay(t *testing.T) {
 	}
 }
 
+// Test cancel simple job,cancel op invalid
+func TestCancelSimpleJob(t *testing.T) {
+	cron := New(WithParser(secondParser), WithChain())
+	cron.Start()
+	defer cron.Stop()
+	time.Sleep(5 * time.Second)
+	var calls int64
+	id, err := cron.AddFunc("@every 5s", func() {
+		time.Sleep(3)
+		atomic.AddInt64(&calls, 1)
+	})
+	if err != nil {
+		t.Errorf("unexpected error %\n", err)
+	}
+	<-time.After(OneSecond * 6)
+	cron.CancelEntry(id)
+	<-time.After(OneSecond * 4)
+	if atomic.LoadInt64(&calls) != 2 {
+		t.Errorf("called %d times, expected 2\n", calls)
+	}
+}
+
+// Test cancel option job,cancel op valid
+func TestCancelOptionJob(t *testing.T) {
+	cron := newWithSeconds()
+	cron.Start()
+	defer cron.Stop()
+	var calls int64
+
+	id, err := cron.AddOptionFunc("@every 5s", func(option *JobOption) {
+		ctx := option.Context
+		select {
+		case <-time.After(OneSecond * 3):
+			atomic.AddInt64(&calls, 1)
+			return
+		case <-ctx.Done():
+			return
+		}
+	})
+
+	if err != nil {
+		t.Errorf("unexpected error %\n", err)
+	}
+	<-time.After(OneSecond * 6)
+	cron.CancelEntry(id)
+	<-time.After(OneSecond * 8)
+	if atomic.LoadInt64(&calls) != 1 {
+		t.Errorf("called %d times, expected 1\n", calls)
+	}
+
+	<-time.After(OneSecond * 5)
+	if atomic.LoadInt64(&calls) != 2 {
+		t.Errorf("called %d times, expected 2\n", calls)
+	}
+}
+
+// Test timeout option job,cancel op valid
+func TestTimeoutOptionJob(t *testing.T) {
+	testTimeoutForSimple := func() {
+		cron := newWithSeconds()
+		cron.Start()
+		defer cron.Stop()
+		var calls int64
+
+		_, err := cron.AddOptionFunc("@every 5s", func(option *JobOption) {
+			ctx := option.Context
+			select {
+			case <-time.After(OneSecond * 3):
+				atomic.AddInt64(&calls, 1)
+				return
+			case <-ctx.Done():
+				return
+			}
+		}, func(entry *Entry) {
+			entry.Timeout = OneSecond * 2
+		})
+
+		if err != nil {
+			t.Errorf("unexpected error %\n", err)
+		}
+		<-time.After(OneSecond * 8)
+		if atomic.LoadInt64(&calls) != 0 {
+			t.Errorf("called %d times, expected 0\n", calls)
+		}
+	}
+
+	testTimeoutForCancel := func() {
+		cron := newWithSeconds()
+		cron.Start()
+		defer cron.Stop()
+		var calls int64
+
+		id, err := cron.AddOptionFunc("@every 5s", func(option *JobOption) {
+			ctx := option.Context
+			select {
+			case <-time.After(OneSecond * 2):
+				atomic.AddInt64(&calls, 1)
+				return
+			case <-ctx.Done():
+				return
+			}
+		}, func(entry *Entry) {
+			entry.Timeout = OneSecond * 3
+		})
+
+		if err != nil {
+			t.Errorf("unexpected error %\n", err)
+		}
+		<-time.After(OneSecond * 1)
+		cron.CancelEntry(id)
+		if atomic.LoadInt64(&calls) != 0 {
+			t.Errorf("called %d times, expected 0\n", calls)
+		}
+	}
+
+	t.Run("test for timeout", func(t *testing.T) {
+		t.Run("simple timeout case", func(t *testing.T) {
+			testTimeoutForSimple()
+		})
+
+		t.Run("Cancel ahead of time without timeout", func(t *testing.T) {
+			testTimeoutForCancel()
+		})
+
+	})
+
+}
+
 func TestRemoveOptionJob(t *testing.T) {
 	cron := newWithSeconds()
 	cron.Start()
