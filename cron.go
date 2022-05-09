@@ -83,6 +83,10 @@ type Entry struct {
 	// It is kept around so that user code that needs to get at the job later,
 	// e.g. via Entries() can do so.
 	Job Job
+
+	// Paused is a flag to indicate that whether the job is currently paused.
+	Paused   bool
+	PausedMu sync.Mutex
 }
 
 // Valid returns true if this is not the zero entry.
@@ -97,6 +101,12 @@ func (e Entry) ScheduleFirst(now time.Time) time.Time {
 	} else {
 		return e.Schedule.Next(now)
 	}
+}
+
+func (e *Entry) isPaused() bool {
+	e.PausedMu.Lock()
+	defer e.PausedMu.Unlock()
+	return e.Paused
 }
 
 // byTime is a wrapper for sorting the entry array by time
@@ -192,6 +202,7 @@ func (c *Cron) Schedule(schedule Schedule, cmd Job, entryOpts ...EntryOption) En
 		Schedule:   schedule,
 		WrappedJob: c.chain.Then(cmd),
 		Job:        cmd,
+		Paused:     false,
 	}
 	for _, fn := range entryOpts {
 		fn(entry)
@@ -354,6 +365,14 @@ func (c *Cron) run() {
 						break
 					}
 
+					if e.isPaused() {
+						// Updating Next and Prev so that the schedule continues to be maintained.
+						// This will help us proceed once the job is continued.
+						e.Prev = e.Next
+						e.Next = e.Schedule.Next(now)
+						continue
+					}
+
 					c.startJob(e.WrappedJob)
 					e.Prev = e.Next
 					e.Next = e.Schedule.Next(now)
@@ -443,6 +462,44 @@ func (c *Cron) Stop() context.Context {
 		cancel()
 	}()
 	return ctx
+}
+
+// Pause the cron job corresponding to the given id.
+// This would result in a no-op if the job is currently paused.
+func (c *Cron) Pause(id EntryID) error {
+	var validId = false
+	for _, entry := range c.entries {
+		if entry.ID == id {
+			entry.PausedMu.Lock()
+			entry.Paused = true
+			validId = true
+			entry.PausedMu.Unlock()
+			break
+		}
+	}
+	if !validId {
+		return errors.New("invalid entry id")
+	}
+	return nil
+}
+
+// Continue the cron job corresponding to the given id.
+// This would result in a no-op if the job is not currently in a paused state.
+func (c *Cron) Continue(id EntryID) error {
+	var validId = false
+	for _, entry := range c.entries {
+		if entry.ID == id {
+			entry.PausedMu.Lock()
+			entry.Paused = false
+			validId = true
+			entry.PausedMu.Unlock()
+			break
+		}
+	}
+	if !validId {
+		return errors.New("invalid entry id")
+	}
+	return nil
 }
 
 // entrySnapshot returns a copy of the current cron entry list.
