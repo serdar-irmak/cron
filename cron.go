@@ -1,10 +1,10 @@
 package cron
 
 import (
+	"container/heap"
 	"context"
 	"errors"
 	"fmt"
-	"sort"
 	"sync"
 	"time"
 )
@@ -13,7 +13,7 @@ import (
 // specified by the schedule. It may be started, stopped, and the entries may
 // be inspected while running.
 type Cron struct {
-	entries        []*Entry
+	entries        EntryHeap
 	chain          Chain
 	stop           chan struct{}
 	add            chan *Entry
@@ -242,7 +242,7 @@ func (c *Cron) Schedule(schedule Schedule, cmd Job, entryOpts ...EntryOption) En
 		fn(entry)
 	}
 	if !c.running {
-		c.entries = append(c.entries, entry)
+		heap.Push(&c.entries, entry)
 	} else {
 		c.add <- entry
 	}
@@ -358,9 +358,6 @@ func (c *Cron) Run() {
 // timeTillEarliestEntry returns the time remaining until the first
 // execution of the earliest entry to run.
 func (c *Cron) timeTillEarliestEntry(now time.Time) time.Duration {
-	// Determine the next entry to run.
-	sort.Sort(byTime(c.entries))
-
 	if len(c.entries) == 0 || c.entries[0].Next.IsZero() {
 		// If there are no entries yet, just sleep - it still handles new entries
 		// and stop requests.
@@ -376,10 +373,15 @@ func (c *Cron) run() {
 
 	// Figure out the next activation times for each entry.
 	now := c.now()
-	for _, entry := range c.entries {
+	sortedEntries := new(EntryHeap)
+	for len(c.entries) > 0 {
+		entry := heap.Pop(&c.entries).(*Entry)
 		entry.Next = entry.ScheduleFirst(now)
+		heap.Push(sortedEntries, entry)
 		c.logger.Info("schedule", "now", now, "entry", entry.ID, "next", entry.Next)
 	}
+
+	c.entries = *sortedEntries
 
 	for {
 		// timer to timeout when it is time for the next entry to run.
@@ -391,10 +393,9 @@ func (c *Cron) run() {
 				now = now.In(c.location)
 				c.logger.Info("wake", "now", now)
 
-				del := 0
-
 				// Run every entry whose next time was less than now
-				for k, e := range c.entries {
+				for {
+					e := c.entries.Peek()
 					if e.Next.After(now) || e.Next.IsZero() {
 						break
 					}
@@ -402,23 +403,26 @@ func (c *Cron) run() {
 					if e.isPaused() {
 						// Updating Next and Prev so that the schedule continues to be maintained.
 						// This will help us proceed once the job is continued.
+						e = heap.Pop(&c.entries).(*Entry)
 						e.Prev = e.Next
 						e.Next = e.Schedule.Next(now)
+						c.logger.Info("paused,skip that schedule", "now", now, "entry", e.ID, "next", e.Next)
+						heap.Push(&c.entries, e)
 						continue
 					}
+
+					e = heap.Pop(&c.entries).(*Entry)
 
 					c.startJob(e.WrappedJob)
 					e.Prev = e.Next
 					e.Next = e.Schedule.Next(now)
 					c.logger.Info("run", "now", now, "entry", e.ID, "next", e.Next)
-					// only run once
-					if e.Schedule.IsOnce() {
-						c.entries[k] = c.entries[del]
-						del++
+					if !e.Schedule.IsOnce() {
+						heap.Push(&c.entries, e)
+					} else {
+						c.logger.Info("job run once,not add again", "now", now, "entry", e.ID, "once", e.Schedule.IsOnce())
 					}
-
 				}
-				c.entries = c.entries[del:]
 
 			case newEntry := <-c.add:
 				timer.Stop()
@@ -554,13 +558,12 @@ func (c *Cron) entrySnapshot() []Entry {
 
 // removeEntry removes the entry corresponding to the given ID from the entry list.
 func (c *Cron) removeEntry(id EntryID) {
-	var entries []*Entry
-	for _, e := range c.entries {
-		if e.ID != id {
-			entries = append(entries, e)
+	for idx, e := range c.entries {
+		if e.ID == id {
+			heap.Remove(&c.entries, idx)
+			return
 		}
 	}
-	c.entries = entries
 }
 
 func (c *Cron) hasEntry(id EntryID) bool {

@@ -2,6 +2,7 @@ package cron
 
 import (
 	"bytes"
+	"container/heap"
 	"fmt"
 	"log"
 	"strings"
@@ -487,9 +488,14 @@ func TestJob(t *testing.T) {
 	expecteds := []string{"job2", "job4", "job5", "job1", "job3", "job0"}
 
 	var actuals []string
-	for _, entry := range cron.Entries() {
+
+	clone := new(EntryHeap)
+	for len(cron.entries) > 0 {
+		entry := heap.Pop(&cron.entries).(*Entry)
 		actuals = append(actuals, entry.Job.(testJob).name)
+		heap.Push(clone, entry)
 	}
+	cron.entries = *clone
 
 	for i, expected := range expecteds {
 		if actuals[i] != expected {
