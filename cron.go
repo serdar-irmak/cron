@@ -471,10 +471,15 @@ func (c *Cron) run() {
 				now = c.now()
 				// Update the next execution time of the entry using the updated schedule.
 				scheduleUpdated := false
+				now = c.now()
+				// Update the next execution time of the entry using the updated schedule.
+				var scheduleUpdatedEntry *Entry
+
 				for _, e := range c.entries {
 					if e.ID == newScheduleUpdateInfo.id {
 						e.Schedule = newScheduleUpdateInfo.schedule
 						e.Next = e.Schedule.Next(now)
+						scheduleUpdatedEntry = e
 						scheduleUpdated = true
 						break
 					}
@@ -483,6 +488,11 @@ func (c *Cron) run() {
 				// entries[0] might no longer correspond to the next entry to run.
 				// Reinitialize the timer.
 				if scheduleUpdated {
+					timer.Stop()
+					now = c.now()
+					c.removeEntry(newScheduleUpdateInfo.id)
+					heap.Push(&c.entries, scheduleUpdatedEntry)
+					c.logger.Info("updated", "entry", scheduleUpdatedEntry.ID, "next", scheduleUpdatedEntry.Next)
 					timer = time.NewTimer(c.timeTillEarliestEntry(now))
 				}
 			}
